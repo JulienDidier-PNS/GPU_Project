@@ -168,32 +168,50 @@ def apply_sobel_filter(image_src):
 ################ PARTIE THRESHOLD ################
 
 @cuda.jit
-def threshold_kernel(magnitude, output, low_thresh, high_thresh):
+def combined_threshold_and_suppression_kernel(magnitude, direction, output, low_thresh, high_thresh):
     x, y = cuda.grid(2)
-    if x < magnitude.shape[0] and y < magnitude.shape[1]:
+    rows, cols = magnitude.shape
+    if x > 0 and x < rows - 1 and y > 0 and y < cols - 1:
         mag = magnitude[x, y]
-        if mag > high_thresh:
-            output[x, y] = 255  # Bord fort
-        elif mag > low_thresh:
-            output[x, y] = 25   # Bord faible
-        else:
-            output[x, y] = 0    # Non-bord
+        angle = direction[x, y] * (180 / np.pi) % 180  # Convertir radian en degré
 
-def apply_threshold(magnitude):
+        # Déterminer les voisins à comparer basés sur la direction du gradient
+        if (0 <= angle < 22.5) or (157.5 <= angle <= 180):
+            n1, n2 = magnitude[x, y+1], magnitude[x, y-1]
+        elif (22.5 <= angle < 67.5):
+            n1, n2 = magnitude[x-1, y-1], magnitude[x+1, y+1]
+        elif (67.5 <= angle < 112.5):
+            n1, n2 = magnitude[x+1, y], magnitude[x-1, y]
+        elif (112.5 <= angle < 157.5):
+            n1, n2 = magnitude[x-1, y+1], magnitude[x+1, y-1]
+
+        # Suppression des non-maxima
+        if mag > n1 and mag > n2:
+            # Appliquer le seuillage
+            if mag > high_thresh:
+                output[x, y] = 255  # Bord fort
+            elif mag > low_thresh:
+                output[x, y] = 25   # Bord faible
+            else:
+                output[x, y] = 0    # Non-bord
+        else:
+            output[x, y] = 0  # Suppression des non-maxima
+
+def apply_threshold_and_suppression(magnitude, direction):
     output = np.zeros_like(magnitude, dtype=np.uint8)
     magnitude_gpu = cuda.to_device(magnitude)
+    direction_gpu = cuda.to_device(direction)
     output_gpu = cuda.device_array_like(output)
 
     threadsperblock = (16, 16)
     blockspergrid_x = (magnitude.shape[0] + threadsperblock[0] - 1) // threadsperblock[0]
     blockspergrid_y = (magnitude.shape[1] + threadsperblock[1] - 1) // threadsperblock[1]
 
-    # Seuils pour le thresholding
     low_thresh = 60
     high_thresh = 100
 
-    threshold_kernel[(blockspergrid_x, blockspergrid_y), threadsperblock](
-        magnitude_gpu, output_gpu, low_thresh, high_thresh
+    combined_threshold_and_suppression_kernel[(blockspergrid_x, blockspergrid_y), threadsperblock](
+        magnitude_gpu, direction_gpu, output_gpu, low_thresh, high_thresh
     )
 
     output = output_gpu.copy_to_host()
