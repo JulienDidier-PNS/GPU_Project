@@ -219,6 +219,51 @@ def apply_threshold_and_suppression(magnitude, direction):
 
 ################ FIN PARTIE THRESHOLD ################
 
+################ PARTIE HYSTERESIS ################
+
+@cuda.jit
+def hysteresis_kernel(thresholded_image, output):
+    x, y = cuda.grid(2)
+    rows, cols = thresholded_image.shape
+    if x >= rows or y >= cols:
+        return
+
+    # Ne traiter que les pixels faibles
+    if thresholded_image[x, y] == 25:
+        # Vérifier les 8 voisins pour voir si au moins un est un bord fort
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < rows and 0 <= ny < cols:
+                    if thresholded_image[nx, ny] == 255:
+                        output[x, y] = 255
+                        return
+        output[x, y] = 0
+    else:
+        # Copier la valeur de l'entrée vers la sortie pour les bords forts et non-bords
+        output[x, y] = thresholded_image[x, y]
+
+def apply_hysteresis(image_src):
+    image = Image.open(image_src).convert('L')
+    thresholded_image = np.array(image)
+
+    output = np.zeros_like(thresholded_image)
+    thresholded_image_gpu = cuda.to_device(thresholded_image)
+    output_gpu = cuda.device_array_like(output)
+
+    threadsperblock = (16, 16)
+    blockspergrid_x = (thresholded_image.shape[0] + threadsperblock[0] - 1) // threadsperblock[0]
+    blockspergrid_y = (thresholded_image.shape[1] + threadsperblock[1] - 1) // threadsperblock[1]
+
+    hysteresis_kernel[(blockspergrid_x, blockspergrid_y), threadsperblock](
+        thresholded_image_gpu, output_gpu
+    )
+
+    final_output = output_gpu.copy_to_host()
+    return final_output
+
+################ FIN PARTIE HYSTERESIS ################
+
 def main():
     print(sys.argv)
     #savoir si la commmande contient 'help'
