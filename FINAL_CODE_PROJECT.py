@@ -131,7 +131,7 @@ def sobel_kernel(image, output_magnitude, output_direction, Sx, Sy):
         output_direction[y, x] = math.atan2(gy, gx)
 
 def apply_sobel_filter(image_src):
-    image = Image.open(image_src).convert('L')
+    image = Image.open(image_src).convert('L') # CE CONVERT DEVRA POTENTIELLEMENT SAUTER
     image_np = np.array(image)
 
     image_gpu = cuda.to_device(image_np)
@@ -157,6 +157,9 @@ def apply_sobel_filter(image_src):
     
     magnitude = magnitude_gpu.copy_to_host()
     direction = direction_gpu.copy_to_host()
+
+    sobel_image = Image.fromarray(magnitude.astype(np.uint8))
+    sobel_image.save('sobel_image.jpg')
     
     return magnitude, direction
 
