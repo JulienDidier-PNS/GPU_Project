@@ -5,6 +5,32 @@ import numpy as np
 from PIL import Image
 import math
 
+#PARTIE UTILS
+
+def add_suffix_to_filename(filename, suffix):
+    # Séparer le nom de fichier et son extension
+    name, extension = os.path.splitext(filename)
+    # Ajouter le suffixe entre le nom et l'extension
+    new_filename = f"{name}_{suffix}{extension}"
+    return new_filename
+
+def delete_files_in_directory(directory):
+    # Vérifier si le chemin correspond à un dossier
+    if os.path.isdir(directory):
+        # Parcourir tous les fichiers dans le dossier
+        for filename in os.listdir(directory):
+            file_path = os.path.join(directory, filename)
+            # Vérifier si le chemin est un fichier
+            if os.path.isfile(file_path):
+                # Supprimer le fichier
+                os.remove(file_path)
+            # Si le chemin est un dossier, récursivement supprimer tous ses fichiers
+            elif os.path.isdir(file_path):
+                delete_files_in_directory(file_path)
+    else:
+        print("Le chemin spécifié n'est pas un dossier.")
+
+
 ################ PARTIE BW ################
 
 @cuda.jit
@@ -45,7 +71,13 @@ def compute_BW(img_src,img_dst):
 
     # on enregistre l'image
     grayscale_pil_image = Image.fromarray(grayscale_image.astype(np.uint8))
-    grayscale_pil_image.save(img_dst)
+
+    filepath = img_dst
+    suffix = "B&W"
+    new_filepath = add_suffix_to_filename(filepath, suffix)
+    print(new_filepath)
+    grayscale_pil_image.save(new_filepath)
+    return new_filepath
 
 ################ FIN PARTIE BW ################
 
@@ -54,29 +86,30 @@ def compute_BW(img_src,img_dst):
 @cuda.jit
 def gaussian_blur_kernel(input_image, output_image, filter, filter_sum):
     x, y = cuda.grid(2)
-    rows, cols, channels = input_image.shape
+
+    rows, cols = input_image.shape
     if x >= rows or y >= cols:
         return  # Vérifier les limites pour éviter des accès hors des limites de l'image
 
     filter_size = filter.shape[0]
     radius = filter_size // 2
 
-    for c in range(channels):
-        temp = 0.0
-        for i in range(filter_size):
-            for j in range(filter_size):
-                offset_x = x + i - radius
-                offset_y = y + j - radius
-                # Gérer les bords de l'image
-                if 0 <= offset_x < rows and 0 <= offset_y < cols:
-                    temp += input_image[offset_x, offset_y, c] * filter[i, j]
-                else:
-                    temp += input_image[x, y, c] * filter[i, j]
+    temp = 0.0
+    for i in range(filter_size):
+        for j in range(filter_size):
+            offset_x = x + i - radius
+            offset_y = y + j - radius
+            # Gérer les bords de l'image
+            if 0 <= offset_x < rows and 0 <= offset_y < cols:
+                temp += input_image[offset_x, offset_y] * filter[i, j]
+            else:
+                temp += input_image[x, y] * filter[i, j]
         
         # Appliquer la somme du filtre et saturer les valeurs pour qu'elles restent dans [0, 255]
-        output_image[x, y, c] = min(max(int(temp / filter_sum), 0), 255)
+        output_image[x, y] = min(max(int(temp / filter_sum), 0), 255)
 
-def apply_gaussian_blur(image_path):
+def apply_gaussian_blur(image_path,dst_path):
+    print("GAUSSIAN BLUR :",image_path)
     image = Image.open(image_path)
     input_image_np = np.array(image)
 
@@ -110,7 +143,12 @@ def apply_gaussian_blur(image_path):
     # Récupérer les résultats
     output_image_np = output_image_gpu.copy_to_host()
     filtered_image = Image.fromarray(output_image_np)
-    filtered_image.save('gpu_filtered_image.jpg')
+    filepath = dst_path
+    suffix = "GAUSSIAN"
+    new_filepath = add_suffix_to_filename(filepath, suffix)
+    print(new_filepath)
+    filtered_image.save(new_filepath)
+    return new_filepath
 
 ################ FIN PARTIE GAUSS ################
 
@@ -127,10 +165,13 @@ def sobel_kernel(image, output_magnitude, output_direction, Sx, Sy):
             for j in range(-1, 2):
                 gx += image[y + i, x + j] * Sx[i + 1, j + 1]
                 gy += image[y + i, x + j] * Sy[i + 1, j + 1]
+        #MAXIMUM 175 si la valeur est > 255
+        gx = 175 if gx>255 else gx
+        gy = 175 if gy>255 else gy
         output_magnitude[y, x] = math.sqrt(gx**2 + gy**2)
         output_direction[y, x] = math.atan2(gy, gx)
 
-def apply_sobel_filter(image_src):
+def apply_sobel_filter(image_src,img_dst):
     image = Image.open(image_src).convert('L') # CE CONVERT DEVRA POTENTIELLEMENT SAUTER
     image_np = np.array(image)
 
@@ -144,7 +185,7 @@ def apply_sobel_filter(image_src):
     Sy = np.array([[1, 2, 1],
                    [0, 0, 0],
                    [-1, -2, -1]])
-    
+
     Sx_gpu = cuda.to_device(Sx)
     Sy_gpu = cuda.to_device(Sy)
     
@@ -159,7 +200,12 @@ def apply_sobel_filter(image_src):
     direction = direction_gpu.copy_to_host()
 
     sobel_image = Image.fromarray(magnitude.astype(np.uint8))
-    sobel_image.save('sobel_image.jpg')
+
+    filepath = img_dst
+    suffix = "SOBEL"
+    new_filepath = add_suffix_to_filename(filepath, suffix)
+    print(new_filepath)
+    sobel_image.save(new_filepath)
     
     return magnitude, direction
 
@@ -207,8 +253,8 @@ def apply_threshold_and_suppression(magnitude, direction):
     blockspergrid_x = (magnitude.shape[0] + threadsperblock[0] - 1) // threadsperblock[0]
     blockspergrid_y = (magnitude.shape[1] + threadsperblock[1] - 1) // threadsperblock[1]
 
-    low_thresh = 60
-    high_thresh = 100
+    low_thresh = 51
+    high_thresh = 102
 
     combined_threshold_and_suppression_kernel[(blockspergrid_x, blockspergrid_y), threadsperblock](
         magnitude_gpu, direction_gpu, output_gpu, low_thresh, high_thresh
@@ -217,6 +263,14 @@ def apply_threshold_and_suppression(magnitude, direction):
     output = output_gpu.copy_to_host()
     return output
 
+def saveThreshold(output,img_dst):
+    threshold_image = Image.fromarray(output)
+    filepath = img_dst
+    suffix = "THRESHOLD"
+    new_filepath = add_suffix_to_filename(filepath, suffix)
+    print(new_filepath)
+    threshold_image.save(new_filepath)
+    return new_filepath
 ################ FIN PARTIE THRESHOLD ################
 
 ################ PARTIE HYSTERESIS ################
@@ -262,6 +316,13 @@ def apply_hysteresis(image_src):
     final_output = output_gpu.copy_to_host()
     return final_output
 
+def saveHysteresis(output,img_dst):
+    threshold_image = Image.fromarray(output)
+    filepath = img_dst
+    suffix = "HYSTERESIS"
+    new_filepath = add_suffix_to_filename(filepath, suffix)
+    print(new_filepath)
+    threshold_image.save(new_filepath)
 ################ FIN PARTIE HYSTERESIS ################
 
 def main():
@@ -273,18 +334,37 @@ def main():
         #savoir si la commande contient 'inputImage' et 'outputImage'
         if '--inputImage' in sys.argv and '--outputImage' in sys.argv:
             print("inputImage and outputImage")
+            img_src = sys.argv[sys.argv.index('--inputImage')+1]
+            img_dst = sys.argv[sys.argv.index('--outputImage')+1]
+
             if('--threshold ' in sys.argv):
                 print("perform all kernels up to threshold_kernel")
-            elif('--sobel ' in sys.argv):
-                print("perform all kernels up to sobel_kernel  and write to disk the magnitude of each pixel")
+                img_src = compute_BW(img_src,img_dst)
+                img_src = apply_gaussian_blur(img_src,img_dst)
+                magnitude, direction = apply_sobel_filter(img_src,img_dst)
+                output = apply_threshold_and_suppression(magnitude, direction)
+                saveThreshold(output,img_dst)
+            elif('--sobel' in sys.argv):
+                print("perform all kernels up to sobel_kernel and write to disk the magnitude of each pixel")
+                img_src = compute_BW(img_src,img_dst)
+                img_src = apply_gaussian_blur(img_src,img_dst)
+                apply_sobel_filter(img_src,img_dst)
             elif('--gauss' in sys.argv):
                 print("perform the bw_kernel and the gauss_kernel")
-                compute_BW(sys.argv[sys.argv.index('--inputImage')+1],sys.argv[sys.argv.index('--outputImage')+1])
+                img_src = compute_BW(img_src,img_dst)
+                apply_gaussian_blur(img_src,img_dst)
             elif('--bw' in sys.argv):
                 print('Black and White computing..')
-                compute_BW(sys.argv[sys.argv.index('--inputImage')+1],sys.argv[sys.argv.index('--outputImage')+1])
+                compute_BW(img_src,img_dst)
             else:
-                print("perform all kernels")
+                print("performing all kernels")
+                img_src = compute_BW(img_src,img_dst)
+                img_src = apply_gaussian_blur(img_src,img_dst)
+                magnitude, direction = apply_sobel_filter(img_src,img_dst)
+                output = apply_threshold_and_suppression(magnitude, direction)
+                img_src = saveThreshold(output,img_dst)
+                outputHysteresis = apply_hysteresis(img_src)
+                saveHysteresis(outputHysteresis,img_dst)
         else:
             #
             print("Les options : inputImage or outputImage sont obligatoires !!")
