@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 from numba import cuda
 import numpy as np
 from PIL import Image
@@ -7,29 +8,10 @@ import math
 
 #PARTIE UTILS
 
-def add_suffix_to_filename(filename, suffix):
-    # Séparer le nom de fichier et son extension
-    name, extension = os.path.splitext(filename)
-    # Ajouter le suffixe entre le nom et l'extension
-    new_filename = f"{name}_{suffix}{extension}"
-    return new_filename
-
-def delete_files_in_directory(directory):
-    # Vérifier si le chemin correspond à un dossier
-    if os.path.isdir(directory):
-        # Parcourir tous les fichiers dans le dossier
-        for filename in os.listdir(directory):
-            file_path = os.path.join(directory, filename)
-            # Vérifier si le chemin est un fichier
-            if os.path.isfile(file_path):
-                # Supprimer le fichier
-                os.remove(file_path)
-            # Si le chemin est un dossier, récursivement supprimer tous ses fichiers
-            elif os.path.isdir(file_path):
-                delete_files_in_directory(file_path)
-    else:
-        print("Le chemin spécifié n'est pas un dossier.")
-
+def saveImage(output,path):
+    final_image = Image.fromarray(output)
+    print(path)
+    final_image.save(path)
 
 ################ PARTIE BW ################
 
@@ -46,7 +28,7 @@ def computeBWcuda(img,dst):
         gray = 0.3 * red + 0.59 * green + 0.11 * blue
         dst[x, y] = gray
 
-def compute_BW(img_src,img_dst):
+def compute_BW(img_src,tb_to_use):
     img = Image.open(img_src)
     src = np.array(img)
     #On range les données en mémoire de manière contigues (sans espaces entre-elles)
@@ -55,7 +37,7 @@ def compute_BW(img_src,img_dst):
     #on prends les dimensions de l'image
     height, width, _ = src.shape
     #un thread par pixel
-    block_size = (1,1)
+    block_size = tb_to_use
     #On calcule la taille de notre grille --> taille de l'image
     grid_size = (math.ceil(height / block_size[0]), math.ceil(width / block_size[1]))
 
@@ -69,15 +51,8 @@ def compute_BW(img_src,img_dst):
     #on copie le résultat vers le cpu
     grayscale_image = output_cuda_gray_img.copy_to_host()
 
-    # on enregistre l'image
-    grayscale_pil_image = Image.fromarray(grayscale_image.astype(np.uint8))
-
-    filepath = img_dst
-    suffix = "B&W"
-    new_filepath = add_suffix_to_filename(filepath, suffix)
-    print(new_filepath)
-    grayscale_pil_image.save(new_filepath)
-    return new_filepath
+    #grayscale_pil_image.save(new_filepath)
+    return grayscale_image.astype(np.uint8)
 
 ################ FIN PARTIE BW ################
 
@@ -108,9 +83,7 @@ def gaussian_blur_kernel(input_image, output_image, filter, filter_sum):
         # Appliquer la somme du filtre et saturer les valeurs pour qu'elles restent dans [0, 255]
         output_image[x, y] = min(max(int(temp / filter_sum), 0), 255)
 
-def apply_gaussian_blur(image_path,dst_path):
-    print("GAUSSIAN BLUR :",image_path)
-    image = Image.open(image_path)
+def apply_gaussian_blur(image,tb_to_use):
     input_image_np = np.array(image)
 
     # Définir le filtre gaussien et sa somme
@@ -130,7 +103,7 @@ def apply_gaussian_blur(image_path,dst_path):
     output_image_gpu = cuda.device_array_like(input_image_np)
 
     # Configuration des blocs et des grilles
-    threadsperblock = (16, 16)
+    threadsperblock = tb_to_use
     blockspergrid_x = (input_image_np.shape[0] + threadsperblock[0] - 1) // threadsperblock[0]
     blockspergrid_y = (input_image_np.shape[1] + threadsperblock[1] - 1) // threadsperblock[1]
     blockspergrid = (blockspergrid_x, blockspergrid_y)
@@ -142,13 +115,7 @@ def apply_gaussian_blur(image_path,dst_path):
 
     # Récupérer les résultats
     output_image_np = output_image_gpu.copy_to_host()
-    filtered_image = Image.fromarray(output_image_np)
-    filepath = dst_path
-    suffix = "GAUSSIAN"
-    new_filepath = add_suffix_to_filename(filepath, suffix)
-    print(new_filepath)
-    filtered_image.save(new_filepath)
-    return new_filepath
+    return output_image_np
 
 ################ FIN PARTIE GAUSS ################
 
@@ -171,9 +138,8 @@ def sobel_kernel(image, output_magnitude, output_direction, Sx, Sy):
         output_magnitude[y, x] = math.sqrt(gx**2 + gy**2)
         output_direction[y, x] = math.atan2(gy, gx)
 
-def apply_sobel_filter(image_src,img_dst):
-    image = Image.open(image_src).convert('L') # CE CONVERT DEVRA POTENTIELLEMENT SAUTER
-    image_np = np.array(image)
+def apply_sobel_filter(image,tb_to_use):
+    image_np = image
 
     image_gpu = cuda.to_device(image_np)
     magnitude_gpu = cuda.device_array_like(image_np)
@@ -189,7 +155,7 @@ def apply_sobel_filter(image_src,img_dst):
     Sx_gpu = cuda.to_device(Sx)
     Sy_gpu = cuda.to_device(Sy)
     
-    threadsperblock = (16, 16)
+    threadsperblock = tb_to_use
     blockspergrid_x = int(np.ceil(image_np.shape[0] / threadsperblock[0]))
     blockspergrid_y = int(np.ceil(image_np.shape[1] / threadsperblock[1]))
     blockspergrid = (blockspergrid_x, blockspergrid_y)
@@ -199,78 +165,43 @@ def apply_sobel_filter(image_src,img_dst):
     magnitude = magnitude_gpu.copy_to_host()
     direction = direction_gpu.copy_to_host()
 
-    sobel_image = Image.fromarray(magnitude.astype(np.uint8))
-
-    filepath = img_dst
-    suffix = "SOBEL"
-    new_filepath = add_suffix_to_filename(filepath, suffix)
-    print(new_filepath)
-    sobel_image.save(new_filepath)
-    
-    return magnitude, direction
+    return magnitude,direction
 
 ################ FIN PARTIE SOBEL ################
 
 ################ PARTIE THRESHOLD ################
 
 @cuda.jit
-def combined_threshold_and_suppression_kernel(magnitude, direction, output, low_thresh, high_thresh):
+def threshold_kernel(magnitude, output, low_thresh, high_thresh):
     x, y = cuda.grid(2)
-    rows, cols = magnitude.shape
-    if x > 0 and x < rows - 1 and y > 0 and y < cols - 1:
+    if x < magnitude.shape[0] and y < magnitude.shape[1]:
         mag = magnitude[x, y]
-        angle = direction[x, y] * (180 / np.pi) % 180  # Convertir radian en degré
-
-        # Déterminer les voisins à comparer basés sur la direction du gradient
-        if (0 <= angle < 22.5) or (157.5 <= angle <= 180):
-            n1, n2 = magnitude[x, y+1], magnitude[x, y-1]
-        elif (22.5 <= angle < 67.5):
-            n1, n2 = magnitude[x-1, y-1], magnitude[x+1, y+1]
-        elif (67.5 <= angle < 112.5):
-            n1, n2 = magnitude[x+1, y], magnitude[x-1, y]
-        elif (112.5 <= angle < 157.5):
-            n1, n2 = magnitude[x-1, y+1], magnitude[x+1, y-1]
-
-        # Suppression des non-maxima
-        if mag > n1 and mag > n2:
-            # Appliquer le seuillage
-            if mag > high_thresh:
-                output[x, y] = 255  # Bord fort
-            elif mag > low_thresh:
-                output[x, y] = 25   # Bord faible
-            else:
-                output[x, y] = 0    # Non-bord
+        if mag > high_thresh:
+            output[x, y] = 255  # Bord fort
+        elif mag > low_thresh:
+            output[x, y] = 25   # Bord faible
         else:
-            output[x, y] = 0  # Suppression des non-maxima
+            output[x, y] = 0    # Non-bord
 
-def apply_threshold_and_suppression(magnitude, direction):
+def apply_threshold(magnitude,tb_to_use):
     output = np.zeros_like(magnitude, dtype=np.uint8)
     magnitude_gpu = cuda.to_device(magnitude)
-    direction_gpu = cuda.to_device(direction)
     output_gpu = cuda.device_array_like(output)
 
-    threadsperblock = (16, 16)
+    threadsperblock = tb_to_use
     blockspergrid_x = (magnitude.shape[0] + threadsperblock[0] - 1) // threadsperblock[0]
     blockspergrid_y = (magnitude.shape[1] + threadsperblock[1] - 1) // threadsperblock[1]
 
+    # Seuils pour le thresholding
     low_thresh = 51
     high_thresh = 102
 
-    combined_threshold_and_suppression_kernel[(blockspergrid_x, blockspergrid_y), threadsperblock](
-        magnitude_gpu, direction_gpu, output_gpu, low_thresh, high_thresh
+    threshold_kernel[(blockspergrid_x, blockspergrid_y), threadsperblock](
+        magnitude_gpu, output_gpu, low_thresh, high_thresh
     )
 
     output = output_gpu.copy_to_host()
     return output
-
-def saveThreshold(output,img_dst):
-    threshold_image = Image.fromarray(output)
-    filepath = img_dst
-    suffix = "THRESHOLD"
-    new_filepath = add_suffix_to_filename(filepath, suffix)
-    print(new_filepath)
-    threshold_image.save(new_filepath)
-    return new_filepath
 ################ FIN PARTIE THRESHOLD ################
 
 ################ PARTIE HYSTERESIS ################
@@ -297,15 +228,14 @@ def hysteresis_kernel(thresholded_image, output):
         # Copier la valeur de l'entrée vers la sortie pour les bords forts et non-bords
         output[x, y] = thresholded_image[x, y]
 
-def apply_hysteresis(image_src):
-    image = Image.open(image_src).convert('L')
+def apply_hysteresis(image,tb_to_use):
     thresholded_image = np.array(image)
 
     output = np.zeros_like(thresholded_image)
     thresholded_image_gpu = cuda.to_device(thresholded_image)
     output_gpu = cuda.device_array_like(output)
 
-    threadsperblock = (16, 16)
+    threadsperblock = tb_to_use
     blockspergrid_x = (thresholded_image.shape[0] + threadsperblock[0] - 1) // threadsperblock[0]
     blockspergrid_y = (thresholded_image.shape[1] + threadsperblock[1] - 1) // threadsperblock[1]
 
@@ -315,14 +245,6 @@ def apply_hysteresis(image_src):
 
     final_output = output_gpu.copy_to_host()
     return final_output
-
-def saveHysteresis(output,img_dst):
-    threshold_image = Image.fromarray(output)
-    filepath = img_dst
-    suffix = "HYSTERESIS"
-    new_filepath = add_suffix_to_filename(filepath, suffix)
-    print(new_filepath)
-    threshold_image.save(new_filepath)
 ################ FIN PARTIE HYSTERESIS ################
 
 def main():
@@ -331,42 +253,63 @@ def main():
     if '--help' in sys.argv:
         print("Voici l'utilisation de ce programme:")
     else:
-        #savoir si la commande contient 'inputImage' et 'outputImage'
-        if '--inputImage' in sys.argv and '--outputImage' in sys.argv:
-            print("inputImage and outputImage")
-            img_src = sys.argv[sys.argv.index('--inputImage')+1]
-            img_dst = sys.argv[sys.argv.index('--outputImage')+1]
+        print("NBArguments : ",len(sys.argv))
+        if len(sys.argv) < 3 :
+            print("Vous devez spécifier une image source et un chemin de destination !!")
+            return -1
+        
+        if len(sys.argv) > 5 :
+            print("Il y a trop d'options 🤯🤯")
+            return -1
 
-            if('--threshold ' in sys.argv):
-                print("perform all kernels up to threshold_kernel")
-                img_src = compute_BW(img_src,img_dst)
-                img_src = apply_gaussian_blur(img_src,img_dst)
-                magnitude, direction = apply_sobel_filter(img_src,img_dst)
-                output = apply_threshold_and_suppression(magnitude, direction)
-                saveThreshold(output,img_dst)
-            elif('--sobel' in sys.argv):
-                print("perform all kernels up to sobel_kernel and write to disk the magnitude of each pixel")
-                img_src = compute_BW(img_src,img_dst)
-                img_src = apply_gaussian_blur(img_src,img_dst)
-                apply_sobel_filter(img_src,img_dst)
-            elif('--gauss' in sys.argv):
-                print("perform the bw_kernel and the gauss_kernel")
-                img_src = compute_BW(img_src,img_dst)
-                apply_gaussian_blur(img_src,img_dst)
-            elif('--bw' in sys.argv):
-                print('Black and White computing..')
-                compute_BW(img_src,img_dst)
-            else:
-                print("performing all kernels")
-                img_src = compute_BW(img_src,img_dst)
-                img_src = apply_gaussian_blur(img_src,img_dst)
-                magnitude, direction = apply_sobel_filter(img_src,img_dst)
-                output = apply_threshold_and_suppression(magnitude, direction)
-                img_src = saveThreshold(output,img_dst)
-                outputHysteresis = apply_hysteresis(img_src)
-                saveHysteresis(outputHysteresis,img_dst)
+        img_src = sys.argv[len(sys.argv)-2]
+        print("IMG SRC : ",img_src)
+        img_dst = sys.argv[len(sys.argv)-1]
+        print("IMG DST : ",img_dst)
+
+        if('--tb' in sys.argv):
+            tb_to_use = (
+                int(sys.argv[sys.argv.index('--tb')+1]),
+                int(sys.argv[sys.argv.index('--tb')+1])
+                )
         else:
-            #
-            print("Les options : inputImage or outputImage sont obligatoires !!")
+            tb_to_use = (16,16)
+
+        start = time.time()
+
+        if('--threshold' in sys.argv):
+            print("perform all kernels up to threshold_kernel")
+            output = compute_BW(img_src,tb_to_use)
+            output = apply_gaussian_blur(output,tb_to_use)
+            magnitude, direction = apply_sobel_filter(output,tb_to_use)
+            final_output = apply_threshold(magnitude,tb_to_use)
+            saveImage(final_output,img_dst)
+        elif('--sobel' in sys.argv):
+            print("perform all kernels up to sobel_kernel and write to disk the magnitude of each pixel")
+            output = compute_BW(img_src,tb_to_use)
+            output = apply_gaussian_blur(output,tb_to_use)
+            final_output,direction = apply_sobel_filter(output,tb_to_use)
+            saveImage(final_output,img_dst)
+        elif('--gauss' in sys.argv):
+            print("perform the bw_kernel and the gauss_kernel")
+            img_output = compute_BW(img_src,tb_to_use)
+            final_output = apply_gaussian_blur(img_output,tb_to_use)
+            saveImage(final_output,img_dst)
+        elif('--bw' in sys.argv):
+            print('Black and White computing..')
+            final_output = compute_BW(img_src,tb_to_use)
+            saveImage(final_output,img_dst)
+        else:
+            print("performing all kernels")
+            output = compute_BW(img_src,tb_to_use)
+            output = apply_gaussian_blur(output,tb_to_use)
+            magnitude, direction = apply_sobel_filter(output,tb_to_use)
+            output = apply_threshold(magnitude,tb_to_use)
+            final_output = apply_hysteresis(output,tb_to_use)
+            saveImage(final_output,img_dst)
+        stop = time.time()
+        elapsed = stop-start
+        print(f'execution time : {elapsed:.3} ms')
+
 
 main()
