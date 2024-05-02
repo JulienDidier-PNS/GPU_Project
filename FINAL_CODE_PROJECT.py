@@ -51,6 +51,67 @@ def compute_BW(img_src,img_dst):
 
 ################ PARTIE GAUSS ################
 
+@cuda.jit
+def gaussian_blur_kernel(input_image, output_image, filter, filter_sum):
+    x, y = cuda.grid(2)
+    rows, cols, channels = input_image.shape
+    if x >= rows or y >= cols:
+        return  # Vérifier les limites pour éviter des accès hors des limites de l'image
+
+    filter_size = filter.shape[0]
+    radius = filter_size // 2
+
+    for c in range(channels):
+        temp = 0.0
+        for i in range(filter_size):
+            for j in range(filter_size):
+                offset_x = x + i - radius
+                offset_y = y + j - radius
+                # Gérer les bords de l'image
+                if 0 <= offset_x < rows and 0 <= offset_y < cols:
+                    temp += input_image[offset_x, offset_y, c] * filter[i, j]
+                else:
+                    temp += input_image[x, y, c] * filter[i, j]
+        
+        # Appliquer la somme du filtre et saturer les valeurs pour qu'elles restent dans [0, 255]
+        output_image[x, y, c] = min(max(int(temp / filter_sum), 0), 255)
+
+def apply_gaussian_blur(image_path):
+    image = Image.open(image_path)
+    input_image_np = np.array(image)
+
+    # Définir le filtre gaussien et sa somme
+    gaussian_filter = np.array([[1, 4, 6, 4, 1],
+                                [4, 16, 24, 16, 4],
+                                [6, 24, 36, 24, 6],
+                                [4, 16, 24, 16, 4],
+                                [1, 4, 6, 4, 1]], dtype=np.float32)
+    filter_sum = gaussian_filter.sum()
+
+    gaussian_filter_gpu = cuda.to_device(gaussian_filter)
+
+    output_image_np = np.zeros_like(input_image_np)
+
+    # Convertir les données en GPU
+    input_image_gpu = cuda.to_device(input_image_np)
+    output_image_gpu = cuda.device_array_like(input_image_np)
+
+    # Configuration des blocs et des grilles
+    threadsperblock = (16, 16)
+    blockspergrid_x = (input_image_np.shape[0] + threadsperblock[0] - 1) // threadsperblock[0]
+    blockspergrid_y = (input_image_np.shape[1] + threadsperblock[1] - 1) // threadsperblock[1]
+    blockspergrid = (blockspergrid_x, blockspergrid_y)
+
+    # Lancer le kernel
+    gaussian_blur_kernel[blockspergrid, threadsperblock](
+        input_image_gpu, output_image_gpu, gaussian_filter_gpu, filter_sum
+    )
+
+    # Récupérer les résultats
+    output_image_np = output_image_gpu.copy_to_host()
+    filtered_image = Image.fromarray(output_image_np)
+    filtered_image.save('gpu_filtered_image.jpg')
+
 ################ FIN PARTIE GAUSS ################
 
 ################ PARTIE SOBEL ################
