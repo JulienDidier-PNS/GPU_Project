@@ -1,8 +1,12 @@
 import sys
 import os
 from numba import cuda
+import numpy as np
+from PIL import Image
+import math
 
-#PARTIE BW
+################ PARTIE BW ################
+
 @cuda.jit
 def computeBWcuda(img,dst):
     #on prend l'indice global
@@ -15,10 +19,8 @@ def computeBWcuda(img,dst):
         blue = img[x, y, 2]
         gray = 0.3 * red + 0.59 * green + 0.11 * blue
         dst[x, y] = gray
+
 def compute_BW(img_src,img_dst):
-    from PIL import Image
-    import numpy as np
-    import math
     img = Image.open(img_src)
     src = np.array(img)
     #On range les données en mémoire de manière contigues (sans espaces entre-elles)
@@ -45,6 +47,64 @@ def compute_BW(img_src,img_dst):
     grayscale_pil_image = Image.fromarray(grayscale_image.astype(np.uint8))
     grayscale_pil_image.save(img_dst)
 
+################ FIN PARTIE BW ################
+
+################ PARTIE GAUSS ################
+
+################ FIN PARTIE GAUSS ################
+
+################ PARTIE SOBEL ################
+
+@cuda.jit
+def sobel_kernel(image, output, Sx, Sy):
+    i, j = cuda.grid(2)
+    if i > 0 and i < image.shape[0] - 1 and j > 0 and j < image.shape[1] - 1:
+        gx = 0
+        gy = 0
+        for k in range(-1, 2):
+            for l in range(-1, 2):
+                gx += image[i + k, j + l] * Sx[k + 1, l + 1]
+                gy += image[i + k, j + l] * Sy[k + 1, l + 1]
+        output[i, j] = math.sqrt(gx**2 + gy**2)
+
+def apply_sobel_filter(image_src):
+    # On charge l'image et on la convertit en tableau NumPy
+    image = Image.open(image_src).convert('L') # CE CONVERT DEVRA POTENTIELLEMENT SAUTER
+    image_np = np.array(image)
+
+    # On créé nos tableaux d'entrée et de sortie sur le GPU
+    image_gpu = cuda.to_device(image_np)
+    output_gpu = cuda.device_array_like(image_np)
+
+    # On définit nos matrices de convolution comme des constantes
+    Sx = np.array([[1, 0, -1],
+                   [2, 0, -2],
+                   [1, 0, -1]])
+    Sy = np.array([[1, 2, 1],
+                   [0, 0, 0],
+                   [-1, -2, -1]])
+    
+    # On transfère Sx et Sy sur le GPU (sans ces deux lignes, on se prend un warning 'NumbaPerformanceWarning')
+    Sx_gpu = cuda.to_device(Sx)  
+    Sy_gpu = cuda.to_device(Sy)
+    
+    # On définit les dimensions du bloc et de la grille
+    threadsperblock = (16, 16) # D'après mes recherches, un block de 256 threads semble optimisé, permettant de maintenir une haute occupation des ressources du GPU sans les surcharger
+    blockspergrid_x = int(np.ceil(image_np.shape[0] / threadsperblock[0]))
+    blockspergrid_y = int(np.ceil(image_np.shape[1] / threadsperblock[1]))
+    blockspergrid = (blockspergrid_x, blockspergrid_y)
+    
+    # On lance le kernel avec les matrices sur le GPU
+    sobel_kernel[blockspergrid, threadsperblock](image_gpu, output_gpu, Sx_gpu, Sy_gpu)
+    
+    # On récupère le résultat du GPU pour le copier sur le CPU, et on enregistre l'image
+    sobel_image_np = output_gpu.copy_to_host()
+    sobel_image = Image.fromarray(sobel_image_np.astype(np.uint8))
+    sobel_image.save('sobel_image_numba.jpg')
+
+    print("Fin du filtre de Sobel avec GPU utilisant Numba")
+
+################ FIN PARTIE SOBEL ################
 
 def main():
     print(sys.argv)
